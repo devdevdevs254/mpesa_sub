@@ -1,53 +1,25 @@
 import streamlit as st
-from mpesa_utils import initiate_stk_push, display_callbacks, init_db, load_callbacks
-import sqlite3
+from mpesa_utils import initiate_stk_push, display_callbacks, init_db
 
-st.set_page_config(page_title="MPESA STK Tester", layout="centered")
-st.title("💳 MPESA STK Push Tester")
+st.set_page_config(page_title="M-PESA STK Push", page_icon="📲")
 
+st.title("📲 M-PESA STK Push Demo")
+st.markdown("Initiate a payment via M-PESA and view callback logs.")
+
+# Initialize database
 init_db()
 
-# 🔍 Filters
-st.sidebar.subheader("🔎 Filter Callbacks")
-filter_txn = st.sidebar.text_input("Transaction ID")
-filter_phone = st.sidebar.text_input("Phone Number")
+# STK Push Form
+with st.form("stk_form"):
+    phone = st.text_input("Phone Number (e.g. 254712345678)")
+    amount = st.number_input("Amount (KES)", min_value=1, value=10)
+    submitted = st.form_submit_button("Send STK Push")
 
-# 📱 Input phone and amount
-with st.form("mpesa_form"):
-    phone = st.text_input("📞 Phone Number (Format: 2547XXXXXXXX)")
-    amount = st.number_input("💵 Amount", min_value=1, step=1)
-    submit = st.form_submit_button("Send STK Push")
+    if submitted:
+        response = initiate_stk_push(phone, amount)
+        st.success("STK Push Sent!" if response.get("ResponseCode") == "0" else "Failed to send STK Push")
+        st.json(response)
 
-if submit:
-    result = initiate_stk_push(phone, int(amount))
-    if result["status"] == "sent":
-        st.success("STK Push sent! ✅")
-    else:
-        st.error(f"Failed to send: {result.get('error')}")
-
-# 📬 Callback viewer
-st.markdown("---")
-st.subheader("📬 Callback Logs")
-
-callbacks = load_callbacks()
-
-# 🧠 Apply filters
-if filter_txn or filter_phone:
-    filtered = []
-    for ts, raw in callbacks:
-        try:
-            data = json.loads(raw)
-            txid = data.get("Body", {}).get("stkCallback", {}).get("CheckoutRequestID", "")
-            number = data.get("Body", {}).get("stkCallback", {}).get("PhoneNumber", "")
-            if (filter_txn and filter_txn in txid) or (filter_phone and filter_phone in str(number)):
-                filtered.append((ts, raw))
-        except:
-            continue
-    callbacks = filtered
-
-if not callbacks:
-    st.info("No matching callbacks.")
-else:
-    for ts, payload in callbacks:
-        with st.expander(f"🕒 {ts}"):
-            st.json(json.loads(payload))
+# Display callback logs
+st.divider()
+display_callbacks()

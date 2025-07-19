@@ -1,183 +1,145 @@
 import requests
 import base64
-import datetime
-import sqlite3
-import streamlit as st
-from fastapi import FastAPI, Request
-import uvicorn
 import json
+import sqlite3
 import os
+from datetime import datetime
+from fastapi import FastAPI, Request
+from dateutil import tz
 import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from email.message import EmailMessage
+import streamlit as st
 
-# 🔐 Validate required secrets
-required_keys = ["CONSUMER_KEY", "CONSUMER_SECRET", "BUSINESS_SHORTCODE", "PASSKEY", "CALLBACK_URL"]
-for key in required_keys:
-    if key not in st.secrets:
-        raise KeyError(f"Missing secret: {key}")
+DB_FILE = "callbacks.db"
+CALLBACK_TABLE = "mpesa_callbacks"
 
-# 💳 Get OAuth token
-def get_token():
+# Load secrets from Streamlit
+def get_secret(key, section=None):
+    if section:
+        return st.secrets[section][key]
+    return st.secrets[key]
+
+# 1. Initialize SQLite DB
+def init_db():
+    if not os.path.exists(DB_FILE):
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS {CALLBACK_TABLE} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    phone TEXT,
+                    amount TEXT,
+                    status TEXT,
+                    timestamp TEXT
+                );
+            """)
+            conn.commit()
+
+# 2. Save callback to DB
+def save_callback(phone, amount, status, timestamp):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(f"""
+            INSERT INTO {CALLBACK_TABLE} (phone, amount, status, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (phone, amount, status, timestamp))
+        conn.commit()
+
+# 3. Display all callbacks
+def display_callbacks():
+    st.subheader("📋 Payment Callback Logs")
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute(f"SELECT * FROM {CALLBACK_TABLE} ORDER BY id DESC").fetchall()
+        if rows:
+            st.table(rows)
+        else:
+            st.info("No callbacks yet.")
+
+# 4. Generate M-PESA access token
+def get_access_token():
     url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
-    try:
-        response = requests.get(
-            url,
-            auth=(st.secrets["CONSUMER_KEY"], st.secrets["CONSUMER_SECRET"])
-        )
-        response.raise_for_status()
-        return response.json()["access_token"]
-    except Exception as e:
-        st.error("Token request failed")
-        raise e
+    consumer_key = get_secret("CONSUMER_KEY")
+    consumer_secret = get_secret("CONSUMER_SECRET")
 
+    auth = base64.b64encode(f"{consumer_key}:{consumer_secret}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}"}
+    response = requests.get(url, headers=headers).json()
 
-# 💰 Initiate STK Push
-def initiate_stk_push(phone: str, amount: int):
-    if not phone.startswith("254") or len(phone) != 12:
-        return {"status": "error", "error": "Invalid phone. Format: 2547XXXXXXXX"}
+    return response.get("access_token")
 
-    shortcode = st.secrets["BUSINESS_SHORTCODE"]
-    passkey = st.secrets["PASSKEY"]
-    timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-    password = base64.b64encode((shortcode + passkey + timestamp).encode()).decode()
+# 5. STK Push Logic
+def initiate_stk_push(phone, amount):
+    access_token = get_access_token()
+    if not access_token:
+        return {"error": "Failed to get access token"}
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    shortcode = get_secret("BUSINESS_SHORTCODE")
+    passkey = get_secret("PASSKEY")
+    password = base64.b64encode(f"{shortcode}{passkey}{timestamp}".encode()).decode()
 
     payload = {
         "BusinessShortCode": shortcode,
         "Password": password,
         "Timestamp": timestamp,
         "TransactionType": "CustomerPayBillOnline",
-        "Amount": amount,
+        "Amount": int(amount),
         "PartyA": phone,
         "PartyB": shortcode,
         "PhoneNumber": phone,
-        "CallBackURL": st.secrets["CALLBACK_URL"],
-        "AccountReference": "TestRef",
-        "TransactionDesc": "Test Payment"
+        "CallBackURL": get_secret("CALLBACK_URL"),
+        "AccountReference": "MpesaSub",
+        "TransactionDesc": "Mpesa Subscription"
     }
 
     headers = {
-        "Authorization": f"Bearer {get_token()}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
 
-    try:
-        res = requests.post(
-            "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
-            headers=headers,
-            json=payload
-        )
-        res.raise_for_status()
-        return {"status": "sent", "response": res.json()}
-    except requests.exceptions.RequestException as e:
-        return {"status": "error", "error": str(e), "details": res.text if res else "No response"}
+    url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
+    return requests.post(url, json=payload, headers=headers).json()
 
+# 6. Send Email Notification
+def send_email_alert(phone, amount, status, timestamp):
+    msg = EmailMessage()
+    msg["Subject"] = "✅ M-PESA Payment Received"
+    msg["From"] = get_secret("EMAIL_USERNAME", "email")
+    msg["To"] = get_secret("EMAIL_TO", "email")
+    msg.set_content(f"""
+M-PESA Payment Callback:
 
-# 🔌 SQLite: Save callbacks
-def init_db():
-    os.makedirs("data", exist_ok=True)
-    conn = sqlite3.connect("data/callbacks.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS callbacks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            received_at TEXT,
-            payload TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+Phone: {phone}
+Amount: {amount}
+Status: {status}
+Time: {timestamp}
+""")
 
+    with smtplib.SMTP(get_secret("EMAIL_HOST", "email"), int(get_secret("EMAIL_PORT", "email"))) as server:
+        server.starttls()
+        server.login(get_secret("EMAIL_USERNAME", "email"), get_secret("EMAIL_PASSWORD", "email"))
+        server.send_message(msg)
 
-def save_callback_to_db(payload):
-    conn = sqlite3.connect("data/callbacks.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO callbacks (received_at, payload) VALUES (?, ?)",
-              (datetime.datetime.now().isoformat(), json.dumps(payload)))
-    conn.commit()
-    conn.close()
-
-
-def load_callbacks():
-    conn = sqlite3.connect("data/callbacks.db")
-    c = conn.cursor()
-    c.execute("SELECT received_at, payload FROM callbacks ORDER BY id DESC LIMIT 50")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-
-# 🔄 Mock Callback Endpoint (FastAPI)
+# 7. FastAPI App for callbacks
 app = FastAPI()
 
-@app.post("/mock_callback")
-async def mock_callback(request: Request):
-    data = await request.json()
-    save_callback_to_db(data)
-
-    # Extract info and send alert (if successful)
+@app.post("/callback")
+async def mpesa_callback(request: Request):
+    body = await request.json()
     try:
-        body = data.get("Body", {})
-        stk_callback = body.get("stkCallback", {})
-        result_code = stk_callback.get("ResultCode")
-        if result_code == 0:
-            meta_items = stk_callback.get("CallbackMetadata", {}).get("Item", [])
-            txn = {item["Name"]: item["Value"] for item in meta_items if "Value" in item}
-            send_email_alert(txn)
+        data = body["Body"]["stkCallback"]
+        result_code = data["ResultCode"]
+        status = "Success" if result_code == 0 else "Failed"
+        metadata = data.get("CallbackMetadata", {}).get("Item", [])
+
+        phone = next((item["Value"] for item in metadata if item["Name"] == "PhoneNumber"), None)
+        amount = next((item["Value"] for item in metadata if item["Name"] == "Amount"), None)
+
+        # Convert timestamp
+        timestamp = datetime.now(tz=tz.tzlocal()).strftime("%Y-%m-%d %H:%M:%S")
+        save_callback(phone, amount, status, timestamp)
+
+        if status == "Success":
+            send_email_alert(phone, amount, status, timestamp)
+
+        return {"ResultCode": 0, "ResultDesc": "Callback received successfully"}
     except Exception as e:
-        print("⚠️ Error parsing for alert:", e)
-
-    print("📥 Callback received:", data)
-    return {"ResultCode": 0, "ResultDesc": "Received"}
-
-
-# 📺 Show Callbacks in Streamlit UI
-def display_callbacks():
-    st.subheader("📬 Recent MPESA Callbacks")
-    rows = load_callbacks()
-    if not rows:
-        st.info("No callbacks received yet.")
-    for ts, payload in rows:
-        with st.expander(f"🕒 {ts}"):
-            st.json(json.loads(payload))
-
-
-# 👟 Run mock server locally
-def start_mock_server():
-    init_db()
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-def send_email_alert(transaction):
-    """Send an email notification for a successful payment."""
-    try:
-        smtp_server = st.secrets["email"]["EMAIL_HOST"]
-        smtp_port = st.secrets["email"]["EMAIL_PORT"]
-        username = st.secrets["email"]["EMAIL_USERNAME"]
-        password = st.secrets["email"]["EMAIL_PASSWORD"]
-        recipient = st.secrets["email"]["EMAIL_TO"]
-
-        subject = "✅ M-PESA Payment Received"
-        body = f"""
-        A new M-PESA payment was received:
-
-        Phone: {transaction.get('PhoneNumber')}
-        Amount: {transaction.get('Amount')}
-        Ref: {transaction.get('MpesaReceiptNumber')}
-        Date: {transaction.get('TransactionDate')}
-        """
-
-        msg = MIMEMultipart()
-        msg["From"] = username
-        msg["To"] = recipient
-        msg["Subject"] = subject
-
-        msg.attach(MIMEText(body, "plain"))
-
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-        server.login(username, password)
-        server.send_message(msg)
-        server.quit()
-
-        print("📧 Email alert sent.")
-    except Exception as e:
-        print("❌ Failed to send email:", str(e))
+        return {"ResultCode": 1, "ResultDesc": f"Error processing callback: {str(e)}"}

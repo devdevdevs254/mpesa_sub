@@ -1,18 +1,7 @@
-# Streamlit App UI
 streamlit
-
-# HTTP requests
 requests
-
-# Time/date handling
 python-dateutil
-
-# Email validation
-email-validator
-
-# Callback receiving via FastAPI
 fastapi
 uvicorn
-
-# Optional but useful utilities
 python-dotenv
+email-validator
