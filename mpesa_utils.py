@@ -4,35 +4,31 @@ import datetime
 import streamlit as st
 
 def get_token():
-    """Fetches OAuth access token from Safaricom"""
-    url = "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
-    response = requests.get(url, auth=(config("CONSUMER_KEY"), config("CONSUMER_SECRET")))
-    response.raise_for_status()
-    return response.json().get("access_token")
-
+    url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
+    response = requests.get(
+        url,
+        auth=(st.secrets["CONSUMER_KEY"], st.secrets["CONSUMER_SECRET"])
+    )
+    return response.json()["access_token"]
 
 def initiate_stk_push(phone: str, amount: int):
-    """Initiates an STK Push to the user's phone number"""
-    shortcode = st.secrets["BUSINESS_SHORTCODE"]
-    passkey = st.secrets["PASSKEY"]                   # from Safaricom
+    shortcode = st.secrets["BUSINESS_SHORTCODE"]  # e.g., 174379
+    passkey = st.secrets["PASSKEY"]
     timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-
-    # Safaricom Password: base64(Shortcode + Passkey + Timestamp)
-    data_to_encode = shortcode + passkey + timestamp
-    password = base64.b64encode(data_to_encode.encode()).decode()
+    password = base64.b64encode((shortcode + passkey + timestamp).encode()).decode()
 
     payload = {
         "BusinessShortCode": shortcode,
         "Password": password,
         "Timestamp": timestamp,
-        "TransactionType": "CustomerBuyGoodsOnline",  # or "CustomerPayBillOnline"
+        "TransactionType": "CustomerPayBillOnline",
         "Amount": amount,
         "PartyA": phone,
         "PartyB": shortcode,
         "PhoneNumber": phone,
-        "CallBackURL": config("CALLBACK_URL"),
-        "AccountReference": "Subscription",
-        "TransactionDesc": "Monthly Premium"
+        "CallBackURL": st.secrets["CALLBACK_URL"],
+        "AccountReference": "TestSubscription",
+        "TransactionDesc": "Sandbox Payment"
     }
 
     headers = {
@@ -41,7 +37,7 @@ def initiate_stk_push(phone: str, amount: int):
     }
 
     response = requests.post(
-        "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
+        "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
         json=payload,
         headers=headers
     )
@@ -49,8 +45,4 @@ def initiate_stk_push(phone: str, amount: int):
     if response.status_code == 200:
         return {"status": "sent", "response": response.json()}
     else:
-        return {
-            "status": "error",
-            "error_code": response.status_code,
-            "error_message": response.text
-        }
+        return {"status": "error", "error": response.text}
