@@ -1,3 +1,22 @@
+# Streamlit App UI
 streamlit
-python-decouple
+
+# HTTP requests
 requests
+
+# Time/date handling
+python-dateutil
+
+# SQLite DB handling (built-in with Python but good to ensure)
+sqlite3
+
+# Email sending
+smtplib
+email-validator
+
+# Callback receiving via FastAPI
+fastapi
+uvicorn
+
+# Optional but useful utilities
+python-dotenv
