@@ -7,9 +7,7 @@ requests
 # Time/date handling
 python-dateutil
 
-
-# Email sending
-smtplib
+# Email validation
 email-validator
 
 # Callback receiving via FastAPI
