@@ -7,8 +7,6 @@ requests
 # Time/date handling
 python-dateutil
 
-# SQLite DB handling (built-in with Python but good to ensure)
-sqlite3
 
 # Email sending
 smtplib
